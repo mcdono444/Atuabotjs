@@ -3,99 +3,19 @@ const fs = require("fs");
 const path = require("path");
 const admin = require("firebase-admin");
 const TelegramBot = require("node-telegram-bot-api");
-const cron = require("node-cron");
-const express = require("express");
 
 let bot; // Variável global para o bot
-
-// ==================== GERENCIADOR DE DUPLICAÇÃO ====================
-// Rastreia callbacks e mensagens recentes para evitar duplicação
-const gerenciadorDuplicacao = {
-  callbacks: new Map(),    // { userId: { data, timestamp } }
-  mensagens: new Map(),    // { userId: { texto, timestamp } }
-  TIMEOUT_CALLBACK: 2000,  // 2 segundos para callbacks
-  TIMEOUT_MENSAGEM: 3000,  // 3 segundos para mensagens
-
-  verificarCallback(userId, data) {
-    const chave = `${userId}_${data}`;
-    const agora = Date.now();
-    
-    if (this.callbacks.has(chave)) {
-      const item = this.callbacks.get(chave);
-      if (agora - item.timestamp < this.TIMEOUT_CALLBACK) {
-        console.log(`⚠️ [DUPLICAÇÃO] Callback ignorado: ${data} do usuário ${userId}`);
-        return false; // Duplicado, ignorar
-      }
-    }
-    
-    this.callbacks.set(chave, { data, timestamp: agora });
-    
-    // Limpar entrada antiga após timeout
-    setTimeout(() => {
-      this.callbacks.delete(chave);
-    }, this.TIMEOUT_CALLBACK);
-    
-    return true; // OK, processar
-  },
-
-  verificarMensagem(userId, texto) {
-    const chave = `${userId}_${texto}`;
-    const agora = Date.now();
-    
-    if (this.mensagens.has(chave)) {
-      const item = this.mensagens.get(chave);
-      if (agora - item.timestamp < this.TIMEOUT_MENSAGEM) {
-        console.log(`⚠️ [DUPLICAÇÃO] Mensagem ignorada: "${texto}" do usuário ${userId}`);
-        return false; // Duplicado, ignorar
-      }
-    }
-    
-    this.mensagens.set(chave, { texto, timestamp: agora });
-    
-    // Limpar entrada antiga após timeout
-    setTimeout(() => {
-      this.mensagens.delete(chave);
-    }, this.TIMEOUT_MENSAGEM);
-    
-    return true; // OK, processar
-  }
-};
-
-// ==================== INICIALIZAR EXPRESS PARA HEALTH CHECK ====================
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Middleware
-app.use(express.json());
-
-// Rota de Health Check
-app.get("/health", (req, res) => {
-  res.status(200).send("OK - Bot rodando!");
-});
-
-// Rota raiz
-app.get("/", (req, res) => {
-  res.status(200).json({ status: "Bot Telegram rodando com sucesso!", timestamp: new Date().toISOString() });
-});
-
-// Iniciar servidor Express (não bloqueia o resto do código)
-app.listen(PORT, () => {
-  console.log(`\n🌐 Servidor HTTP rodando na porta ${PORT}`);
-  console.log(`   📍 Health Check: http://localhost:${PORT}/health`);
-  console.log(`   📍 Status: http://localhost:${PORT}/\n`);
-});
 
 // ==================== DEBUG INICIAL ====================
 console.log("\n");
 console.log("╔════════════════════════════════════════╗");
 console.log("║   🤖 INICIANDO BOT TELEGRAM + FIREBASE   ║");
-console.log("╚══════════════════════════  ═════════════╝\n");
+console.log("╚════════════════════════════════════════╝\n");
 
 console.log("📋 DEBUG - Variáveis de Ambiente:");
 console.log("   TELEGRAM_TOKEN:", process.env.TELEGRAM_TOKEN ? "✅ Configurado" : "❌ Não configurado");
 console.log("   FIREBASE_SERVICE_ACCOUNT:", process.env.FIREBASE_SERVICE_ACCOUNT ? "✅ Configurado" : "❌ Não configurado");
 console.log("   NODE_ENV:", process.env.NODE_ENV || "desenvolvimento");
-console.log("   PORT:", PORT);
 console.log("");
 
 // ==================== INICIALIZAR FIREBASE ====================
@@ -128,7 +48,7 @@ async function inicializarFirebase() {
         }
       }
     }
-    // Método 2: Fallback para arquivo local padrão
+    // Método 3: Fallback para arquivo local padrão
     else if (fs.existsSync("./serviceAccountKey.json")) {
       console.log("   📍 Variável de ambiente não definida, usando arquivo local padrão...");
       serviceAccount = require("./serviceAccountKey.json");
@@ -207,7 +127,7 @@ async function executarComRetry(funcao, tentativas = 3, delay = 1000) {
 
 // ==================== FUNÇÕES AUXILIARES ====================
 
-// Função auxiliar para verificar se usuário bloqueou o bot (ERRO 403)
+// Função auxiliar para verificar se usuário bloqueou o bot
 function verificarBloqueio(error) {
   return error.response && error.response.statusCode === 403 && error.response.body && error.response.body.description.includes("blocked");
 }
@@ -215,9 +135,8 @@ function verificarBloqueio(error) {
 // Função para enviar mensagem com tratamento de bloqueio
 function enviarMensagemComBloqueio(chatId, mensagem, opcoes = {}) {
   return bot.sendMessage(chatId, mensagem, opcoes).catch((err) => {
-    // ✅ Tratamento de erro 403 - usuário bloqueou o bot
     if (verificarBloqueio(err)) {
-      console.log(`🚫 Usuário ${chatId} bloqueou o bot (erro 403)`);
+      console.log(`🚫 Usuário ${chatId} bloqueou o bot`);
     } else {
       throw err;
     }
@@ -343,7 +262,6 @@ function inicializarBotTelegram() {
     console.log("   📍 Token encontrado");
     console.log("   📍 Criando instância do bot...");
 
-    // ✅ Bot em polling mode
     bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 
     console.log("✅ Bot Telegram inicializado com sucesso!");
@@ -406,27 +324,14 @@ function inicializarBotTelegram() {
     });
 
     // ==================== CALLBACKS DOS BOTÕES ====================
-    // ✅ OTIMIZAÇÃO 1: Responder IMEDIATAMENTE com answerCallbackQuery
-    // ✅ OTIMIZAÇÃO 2: Verificar duplicação antes de processar
     bot.on("callback_query", async (query) => {
-      const userId = query.from.id;
-      const data = query.data;
-      const chatId = query.message.chat.id;
-
       try {
-        // ✅ PASSO 1: Responder IMEDIATAMENTE ao callback (evita "query is too old")
-        await bot.answerCallbackQuery(query.id);
-        console.log(`📌 Callback respondido IMEDIATAMENTE: ${data} do usuário ${userId}`);
+        const chatId = query.message.chat.id;
+        const userId = query.from.id;
+        const data = query.data;
 
-        // ✅ PASSO 2: Verificar duplicação
-        if (!gerenciadorDuplicacao.verificarCallback(userId, data)) {
-          console.log(`⏭️ Callback duplicado ignorado: ${data}`);
-          return; // Não processar se for duplicado
-        }
+        console.log(`📌 Callback recebido: ${data} do usuário ${userId}`);
 
-        console.log(`📌 Callback processando: ${data} do usuário ${userId}`);
-
-        // ✅ PASSO 3: Processar normalmente (com Firebase e envio de mensagens)
         if (data === "meu_link") {
           await enviarMensagemComBloqueio(chatId, `📋 Seu link de convite: https://t.me/Believeminerbot?start=${userId}`);
         }
@@ -460,6 +365,7 @@ function inicializarBotTelegram() {
           });
         }
 
+        await bot.answerCallbackQuery(query.id);
       } catch (error) {
         console.error("❌ Erro no callback_query:", error.message);
         try {
@@ -471,7 +377,6 @@ function inicializarBotTelegram() {
     });
 
     // ==================== HANDLER: MENSAGENS DE TEXTO ====================
-    // ✅ OTIMIZAÇÃO 3: Verificar duplicação de mensagens
     bot.on("message", async (msg) => {
       try {
         const chatId = msg.chat.id;
@@ -484,14 +389,6 @@ function inicializarBotTelegram() {
         }
 
         console.log(`💬 Mensagem recebida de ${userId}: "${texto}"`);
-
-        // ✅ Verificar duplicação ANTES de processar
-        if (!gerenciadorDuplicacao.verificarMensagem(userId, texto)) {
-          console.log(`⏭️ Mensagem duplicada ignorada: "${texto}"`);
-          return; // Não processar se for duplicada
-        }
-
-        console.log(`💬 Mensagem processando: "${texto}" do usuário ${userId}`);
 
         // Se o usuário enviar número ou endereço USDT, processa saque
         if (/^\+?\d{7,15}$/.test(texto) || /^T[a-zA-Z0-9]{33}$/.test(texto)) {
@@ -553,10 +450,9 @@ async function mensagensDiarias() {
 
     for (const chatId in usuarios) {
       try {
-        // ✅ Tratamento de erro 403
         await bot.sendMessage(chatId, mensagem).catch((err) => {
-          if (err.response && err.response.statusCode === 403) {
-            console.log(`🚫 Usuário ${chatId} bloqueou o bot (erro 403)`);
+          if (verificarBloqueio(err)) {
+            console.log(`🚫 Usuário ${chatId} bloqueou o bot`);
             bloqueados++;
           } else {
             throw err;
@@ -612,10 +508,9 @@ async function rankingSemanal() {
 
     for (const chatId in usuarios) {
       try {
-        // ✅ Tratamento de erro 403
         await bot.sendMessage(chatId, mensagemRanking).catch((err) => {
-          if (err.response && err.response.statusCode === 403) {
-            console.log(`🚫 Usuário ${chatId} bloqueou o bot (erro 403)`);
+          if (verificarBloqueio(err)) {
+            console.log(`🚫 Usuário ${chatId} bloqueou o bot`);
             bloqueados++;
           } else {
             throw err;
@@ -640,64 +535,6 @@ setTimeout(() => {
   rankingSemanal();
   setInterval(rankingSemanal, intervaloRanking);
 }, 2 * 60 * 1000);
-
-// ==================== AGENDAMENTO AUTOMÁTICO COM NODE-CRON ====================
-console.log("\n📅 Configurando agendamento automático de mensagens...\n");
-
-// ✅ Horários fixos: 9h, 16h e 22h
-const horariosAgendados = ["09:00", "16:00", "22:00"];
-
-horariosAgendados.forEach((horario) => {
-  const [hora, minuto] = horario.split(":");
-  
-  // Formato cron: minuto hora * * *
-  const cronExpression = `${minuto} ${hora} * * *`;
-  
-  cron.schedule(cronExpression, async () => {
-    console.log(`\n⏰ [${new Date().toLocaleTimeString('pt-BR')}] ⏰ Acionando envio automático agendado para ${horario}...\n`);
-    await enviarMensagensAutomaticas();
-  });
-  
-  console.log(`   ✅ Agendamento criado para ${horario} (Cron: ${cronExpression})`);
-});
-
-// ✅ Função para enviar mensagens automáticas agendadas
-async function enviarMensagensAutomaticas() {
-  try {
-    console.log('📤 [AGENDADO] Enviando mensagens automáticas...');
-    let enviadas = 0;
-    let bloqueados = 0;
-    let erros = 0;
-
-    const snapshot = await global.db.ref('usuarios').once('value', null, { timeout: 60000 });
-    const usuarios = snapshot.val() || {};
-    
-    // ✅ Mensagem automática padrão
-    const mensagemAutomatica = "🤖 Mensagem automática do bot\n\n⏰ Verifique seus ganhos agora mesmo! 💰";
-
-    for (const chatId in usuarios) {
-      try {
-        // ✅ Tratamento de erro 403 - usuário bloqueou o bot
-        await bot.sendMessage(chatId, mensagemAutomatica).catch((err) => {
-          if (err.response && err.response.statusCode === 403) {
-            console.log(`🚫 [${new Date().toLocaleTimeString('pt-BR')}] Usuário ${chatId} bloqueou o bot (erro 403)`);
-            bloqueados++;
-          } else {
-            throw err;
-          }
-        });
-        enviadas++;
-      } catch (error) {
-        erros++;
-        console.error(`❌ Erro ao enviar para ${chatId}:`, error.message);
-      }
-    }
-
-    console.log(`✅ [${new Date().toLocaleTimeString('pt-BR')}] Mensagens automáticas: ${enviadas} enviadas, ${bloqueados} bloqueados, ${erros} erros\n`);
-  } catch (error) {
-    console.error('❌ Erro ao enviar mensagens automáticas:', error);
-  }
-}
 
 // ==================== INICIALIZAR TUDO ====================
 async function inicializar() {
