@@ -8,6 +8,59 @@ const express = require("express");
 
 let bot; // Variável global para o bot
 
+// ==================== GERENCIADOR DE DUPLICAÇÃO ====================
+// Rastreia callbacks e mensagens recentes para evitar duplicação
+const gerenciadorDuplicacao = {
+  callbacks: new Map(),    // { userId: { data, timestamp } }
+  mensagens: new Map(),    // { userId: { texto, timestamp } }
+  TIMEOUT_CALLBACK: 2000,  // 2 segundos para callbacks
+  TIMEOUT_MENSAGEM: 3000,  // 3 segundos para mensagens
+
+  verificarCallback(userId, data) {
+    const chave = `${userId}_${data}`;
+    const agora = Date.now();
+    
+    if (this.callbacks.has(chave)) {
+      const item = this.callbacks.get(chave);
+      if (agora - item.timestamp < this.TIMEOUT_CALLBACK) {
+        console.log(`⚠️ [DUPLICAÇÃO] Callback ignorado: ${data} do usuário ${userId}`);
+        return false; // Duplicado, ignorar
+      }
+    }
+    
+    this.callbacks.set(chave, { data, timestamp: agora });
+    
+    // Limpar entrada antiga após timeout
+    setTimeout(() => {
+      this.callbacks.delete(chave);
+    }, this.TIMEOUT_CALLBACK);
+    
+    return true; // OK, processar
+  },
+
+  verificarMensagem(userId, texto) {
+    const chave = `${userId}_${texto}`;
+    const agora = Date.now();
+    
+    if (this.mensagens.has(chave)) {
+      const item = this.mensagens.get(chave);
+      if (agora - item.timestamp < this.TIMEOUT_MENSAGEM) {
+        console.log(`⚠️ [DUPLICAÇÃO] Mensagem ignorada: "${texto}" do usuário ${userId}`);
+        return false; // Duplicado, ignorar
+      }
+    }
+    
+    this.mensagens.set(chave, { texto, timestamp: agora });
+    
+    // Limpar entrada antiga após timeout
+    setTimeout(() => {
+      this.mensagens.delete(chave);
+    }, this.TIMEOUT_MENSAGEM);
+    
+    return true; // OK, processar
+  }
+};
+
 // ==================== INICIALIZAR EXPRESS PARA HEALTH CHECK ====================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -36,7 +89,7 @@ app.listen(PORT, () => {
 console.log("\n");
 console.log("╔════════════════════════════════════════╗");
 console.log("║   🤖 INICIANDO BOT TELEGRAM + FIREBASE   ║");
-console.log("╚════════════════════════════════════════╝\n");
+console.log("╚══════════════════════════  ═════════════╝\n");
 
 console.log("📋 DEBUG - Variáveis de Ambiente:");
 console.log("   TELEGRAM_TOKEN:", process.env.TELEGRAM_TOKEN ? "✅ Configurado" : "❌ Não configurado");
@@ -353,14 +406,27 @@ function inicializarBotTelegram() {
     });
 
     // ==================== CALLBACKS DOS BOTÕES ====================
+    // ✅ OTIMIZAÇÃO 1: Responder IMEDIATAMENTE com answerCallbackQuery
+    // ✅ OTIMIZAÇÃO 2: Verificar duplicação antes de processar
     bot.on("callback_query", async (query) => {
+      const userId = query.from.id;
+      const data = query.data;
+      const chatId = query.message.chat.id;
+
       try {
-        const chatId = query.message.chat.id;
-        const userId = query.from.id;
-        const data = query.data;
+        // ✅ PASSO 1: Responder IMEDIATAMENTE ao callback (evita "query is too old")
+        await bot.answerCallbackQuery(query.id);
+        console.log(`📌 Callback respondido IMEDIATAMENTE: ${data} do usuário ${userId}`);
 
-        console.log(`📌 Callback recebido: ${data} do usuário ${userId}`);
+        // ✅ PASSO 2: Verificar duplicação
+        if (!gerenciadorDuplicacao.verificarCallback(userId, data)) {
+          console.log(`⏭️ Callback duplicado ignorado: ${data}`);
+          return; // Não processar se for duplicado
+        }
 
+        console.log(`📌 Callback processando: ${data} do usuário ${userId}`);
+
+        // ✅ PASSO 3: Processar normalmente (com Firebase e envio de mensagens)
         if (data === "meu_link") {
           await enviarMensagemComBloqueio(chatId, `📋 Seu link de convite: https://t.me/Believeminerbot?start=${userId}`);
         }
@@ -394,7 +460,6 @@ function inicializarBotTelegram() {
           });
         }
 
-        await bot.answerCallbackQuery(query.id);
       } catch (error) {
         console.error("❌ Erro no callback_query:", error.message);
         try {
@@ -406,6 +471,7 @@ function inicializarBotTelegram() {
     });
 
     // ==================== HANDLER: MENSAGENS DE TEXTO ====================
+    // ✅ OTIMIZAÇÃO 3: Verificar duplicação de mensagens
     bot.on("message", async (msg) => {
       try {
         const chatId = msg.chat.id;
@@ -418,6 +484,14 @@ function inicializarBotTelegram() {
         }
 
         console.log(`💬 Mensagem recebida de ${userId}: "${texto}"`);
+
+        // ✅ Verificar duplicação ANTES de processar
+        if (!gerenciadorDuplicacao.verificarMensagem(userId, texto)) {
+          console.log(`⏭️ Mensagem duplicada ignorada: "${texto}"`);
+          return; // Não processar se for duplicada
+        }
+
+        console.log(`💬 Mensagem processando: "${texto}" do usuário ${userId}`);
 
         // Se o usuário enviar número ou endereço USDT, processa saque
         if (/^\+?\d{7,15}$/.test(texto) || /^T[a-zA-Z0-9]{33}$/.test(texto)) {
