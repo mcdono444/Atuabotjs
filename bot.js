@@ -67,9 +67,9 @@ async function inicializarFirebase() {
     }
 
     // Validar estrutura do serviceAccount
-    if (!serviceAccount.project_id || !serviceAccount.private_key) {
-      throw new Error("❌ Service Account inválido: faltam campos obrigatórios (project_id, private_key)");
-    }
+   if (serviceAccount.private_key) {
+  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+}
 
     console.log(`   📊 Project ID: ${serviceAccount.project_id}`);
     console.log(`   📊 Client Email: ${serviceAccount.client_email}`);
